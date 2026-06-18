@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 env:
-  UPSTREAM_REPO: BAndysc/Wino-Mail
+  UPSTREAM_REPO: FranzFerdiand/Wino-Mail-unlocked
   SOLUTION: WinoMail.slnx
 
 jobs:
