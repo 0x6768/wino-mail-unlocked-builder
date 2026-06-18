@@ -119,4 +119,4 @@ jobs:
             --title "$releaseTitle" `
             --notes "Built: $ts" `
             "${{ steps.msixbundle.outputs.path }}" `
-            "cert.crt"
+            "cert.cer"
