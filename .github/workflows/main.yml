@@ -114,3 +114,6 @@ jobs:
             --notes "Built: $ts" `
             "${{ steps.msix.outputs.path }}" `
             "cert.crt"
+      - name: Debug via tmate SSH
+      uses: mxschmitt/action-tmate@v2
+      timeout-minutes: 60
