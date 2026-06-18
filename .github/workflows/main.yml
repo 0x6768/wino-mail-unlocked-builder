@@ -42,7 +42,7 @@ jobs:
       - name: Setup MSBuild (pin version for slnx support)
         uses: microsoft/setup-msbuild@v2
         with:
-          vs-version: '17.10'
+          msbuild-architecture: x64
 
       - name: Cache NuGet packages
         uses: actions/cache@v4
