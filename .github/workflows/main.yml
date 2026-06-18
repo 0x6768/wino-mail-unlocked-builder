@@ -11,7 +11,7 @@ permissions:
 env:
   UPSTREAM_REPO: FranzFerdiand/Wino-Mail-unlocked
   SOLUTION: WinoMail.slnx
-  CERT_SUBJECT: 'CN=SzyangSoftware, C=CN'  # 改为你指定的主题
+  CERT_SUBJECT: 'C=CN, CN=SzyangSoftware'  # 改为你指定的主题
 
 jobs:
   build:
@@ -70,7 +70,8 @@ jobs:
             /p:PackageCertificateThumbprint="" `
             /p:AppxPackageSigningEnabled=true `
             /p:EnableSigningChecks=false `
-            /p:IsPackable=false
+            /p:IsPackable=false `
+            /p:AppxAutoRemoveDisposableSigningCertificate=false
 
       - name: Find MSIX (recursive under src)
         id: msix
