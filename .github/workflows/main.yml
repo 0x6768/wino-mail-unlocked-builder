@@ -88,11 +88,11 @@ jobs:
             /p:EnableSigningChecks=false `
             /p:IsPackable=false `
             /p:AppxAutoRemoveDisposableSigningCertificate=false
-      - name: Find MSIX (recursive under src)
-        id: msix
+      - name: Find Msixbundle (recursive under src)
+        id: msixbundle
         shell: pwsh
         run: >
-          $f = Get-ChildItem "src" -Filter "*.msix" -Recurse -File -ErrorAction
+          $f = Get-ChildItem "src" -Filter "*.msixbundle" -Recurse -File -ErrorAction
           SilentlyContinue |
                Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if (-not $f) { Write-Error "MSIX not found under src!"; exit 1 }
@@ -115,8 +115,5 @@ jobs:
           gh release create $tag `
             --title "Wino Mail Unlocked ${{ github.run_number }}" `
             --notes "Built: $ts" `
-            "${{ steps.msix.outputs.path }}" `
+            "${{ steps.msixbundle.outputs.path }}" `
             "cert.crt"
-      - name: Debug via tmate SSH
-        uses: mxschmitt/action-tmate@v2
-        timeout-minutes: 60
