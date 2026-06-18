@@ -11,7 +11,7 @@ permissions:
 env:
   UPSTREAM_REPO: FranzFerdiand/Wino-Mail-unlocked
   SOLUTION: WinoMail.slnx
-  CERT_SUBJECT: 'C=CN, CN=SzyangSoftware'  # 改为你指定的主题
+  CERT_SUBJECT: 'C=CN, CN=SzyangSoftware'
 
 jobs:
   build:
@@ -34,14 +34,12 @@ jobs:
         shell: pwsh
         run: |
           $manifest = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\Package.appxmanifest"
-          # 从环境变量获取主题，确保格式一致
           $escapedSubject = '${{ env.CERT_SUBJECT }}'
-          # 替换 Publisher 属性
           (Get-Content $manifest -Raw) -replace 'Publisher="[^"]*"', "Publisher=`"$escapedSubject`"" |
             Set-Content $manifest -NoNewline
           Write-Host "Patched Publisher → $escapedSubject"
 
-      - name: Setup MSBuild (pin version for slnx support)
+      - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
         with:
           msbuild-architecture: x64
@@ -57,7 +55,20 @@ jobs:
       - name: Restore
         run: msbuild src/${{ env.SOLUTION }} /t:Restore
 
-      - name: Build & Package MSIX (signed with pfx, skip thumbprint check)
+      # ★ 新增：提取 PFX 指纹，传给 Build 步骤
+      - name: Extract PFX Thumbprint
+        id: pfxinfo
+        shell: pwsh
+        run: |
+          $pfxPath = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\SigningCert.pfx"
+          $pwd = ConvertTo-SecureString -String "${{ secrets.SIGN_PFX_PWD }}" -AsPlainText -Force
+          $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($pfxPath, $pwd)
+          $thumb = $cert.Thumbprint
+          Write-Host "Thumbprint: $thumb"
+          "thumbprint=$thumb" >> $env:GITHUB_OUTPUT
+
+      # ★ 修改：PackageCertificateThumbprint 从空字符串改为真实指纹
+      - name: Build & Package MSIX (signed with pfx)
         shell: pwsh
         run: |
           $pfxAbs = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\SigningCert.pfx"
@@ -67,7 +78,7 @@ jobs:
             /p:GenerateAppxPackageOnBuild=true `
             /p:PackageCertificateKeyFile="$pfxAbs" `
             /p:PackageCertificatePassword="${{ secrets.SIGN_PFX_PWD }}" `
-            /p:PackageCertificateThumbprint="" `
+            /p:PackageCertificateThumbprint="${{ steps.pfxinfo.outputs.thumbprint }}" `
             /p:AppxPackageSigningEnabled=true `
             /p:EnableSigningChecks=false `
             /p:IsPackable=false `
