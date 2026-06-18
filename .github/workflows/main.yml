@@ -11,6 +11,7 @@ permissions:
 env:
   UPSTREAM_REPO: FranzFerdiand/Wino-Mail-unlocked
   SOLUTION: WinoMail.slnx
+  CERT_SUBJECT: 'CN=Szyang Open Source, C=CN, ST=Zhejiang'
 
 jobs:
   build:
@@ -20,14 +21,28 @@ jobs:
       - name: Clone upstream (depth=1)
         run: git clone --depth 1 https://github.com/${{ env.UPSTREAM_REPO }}.git src
 
-      - name: Write fixed .pfx from secret
+      - name: Write .pfx from Base64 secret (absolute path)
         shell: pwsh
         run: |
           $bytes = [Convert]::FromBase64String("${{ secrets.SIGN_PFX_B64 }}")
-          [IO.File]::WriteAllBytes("src/WinoMail.Packaging/SigningCert.pfx", $bytes)
+          $pfxPath = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\SigningCert.pfx"
+          New-Item -ItemType Directory -Force -Path (Split-Path $pfxPath) | Out-Null
+          [IO.File]::WriteAllBytes($pfxPath, $bytes)
+          Write-Host "PFX written: $pfxPath  Exists=$(Test-Path $pfxPath)"
 
-      - name: Setup MSBuild
+      - name: Patch AppxManifest Publisher to match cert Subject
+        shell: pwsh
+        run: |
+          $manifest = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\Package.appxmanifest"
+          $certSubject = '${{ env.CERT_SUBJECT }}'
+          (Get-Content $manifest -Raw) -replace 'Publisher="[^"]*"', "Publisher=`"$certSubject`"" |
+            Set-Content $manifest -NoNewline
+          Write-Host "Patched Publisher → $certSubject"
+
+      - name: Setup MSBuild (pin version for slnx support)
         uses: microsoft/setup-msbuild@v2
+        with:
+          vs-version: '17.10'
 
       - name: Cache NuGet packages
         uses: actions/cache@v4
@@ -37,38 +52,43 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-nuget-
 
-      - name: Restore (msbuild restore, 兼容 slnx)
+      - name: Restore
         run: msbuild src/${{ env.SOLUTION }} /t:Restore
 
-      - name: Build & Package MSIX (sign with fixed pfx)
+      - name: Build & Package MSIX (signed with pfx, skip thumbprint check)
         shell: pwsh
         run: |
-          msbuild src/${{ env.SOLUTION }} `
+          $pfxAbs = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\SigningCert.pfx"
+          msbuild "src\${{ env.SOLUTION }}" `
             /p:Configuration=Release `
             /p:Platform=x64 `
             /p:GenerateAppxPackageOnBuild=true `
-            /p:PackageCertificateKeyFile="src/WinoMail.Packaging/SigningCert.pfx" `
+            /p:PackageCertificateKeyFile="$pfxAbs" `
             /p:PackageCertificatePassword="${{ secrets.SIGN_PFX_PWD }}" `
             /p:PackageCertificateThumbprint="" `
             /p:AppxPackageSigningEnabled=true `
+            /p:EnableSigningChecks=false `
             /p:IsPackable=false
 
-      - name: Find MSIX
+      - name: Find MSIX (recursive under src)
         id: msix
         shell: pwsh
         run: |
-          $f = Get-ChildItem src/WinoMail.Packaging -Recurse -Filter *.msix | Select-Object -First 1
-          if (-not $f) { Write-Error "MSIX not found!"; exit 1 }
+          $f = Get-ChildItem "src" -Filter "*.msix" -Recurse -File -ErrorAction SilentlyContinue |
+               Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $f) { Write-Error "MSIX not found under src!"; exit 1 }
+          Write-Host "Found MSIX: $($f.FullName)"
           "path=$($f.FullName)" >> $env:GITHUB_OUTPUT
 
-      - name: Create GitHub Release
+      - name: Create GitHub Release (gh CLI)
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "build-${{ github.run_number }}"
-          $timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss UTC")
+          gh release delete $tag --yes --discard-history 2>$null
+          $ts = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss UTC")
           gh release create $tag `
             --title "Wino Mail Unlocked ${{ github.run_number }}" `
-            --notes "Built: $timestamp" `
+            --notes "Built: $ts" `
             "${{ steps.msix.outputs.path }}"
