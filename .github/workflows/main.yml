@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 env:
-  UPSTREAM_REPO: FranzFerdiand/Wino-Mail-unlocked
+  UPSTREAM_REPO: BAndysc/Wino-Mail
   SOLUTION: WinoMail.slnx
 
 jobs:
@@ -29,6 +29,14 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('src/**/*.csproj', 'src/Directory.Packages.props') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
       - name: Restore (msbuild restore, 兼容 slnx)
         run: msbuild src/${{ env.SOLUTION }} /t:Restore
 
@@ -40,7 +48,8 @@ jobs:
             /p:Platform=x64 `
             /p:GenerateAppxPackageOnBuild=true `
             /p:PackageCertificateKeyFile="src/WinoMail.Packaging/SigningCert.pfx" `
-            /p:PackageCertificatePassword="${{ secrets.SIGN_PFX_PWD }}"
+            /p:PackageCertificatePassword="${{ secrets.SIGN_PFX_PWD }}" `
+            /p:IsPackable=false
 
       - name: Find MSIX
         id: msix
