@@ -34,10 +34,11 @@ jobs:
         shell: pwsh
         run: |
           $manifest = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\Package.appxmanifest"
-          $certSubject = '${{ env.CERT_SUBJECT }}'
-          (Get-Content $manifest -Raw) -replace 'Publisher="[^"]*"', "Publisher=`"$certSubject`"" |
+          # 关键修复：对含空格的值用双引号包裹，并 XML 转义
+          $escapedSubject = 'CN=&quot;Szyang Open Source&quot;, C=CN, ST=Zhejiang'
+          (Get-Content $manifest -Raw) -replace 'Publisher="[^"]*"', "Publisher=`"$escapedSubject`"" |
             Set-Content $manifest -NoNewline
-          Write-Host "Patched Publisher → $certSubject"
+          Write-Host "Patched Publisher → $escapedSubject"
 
       - name: Setup MSBuild (pin version for slnx support)
         uses: microsoft/setup-msbuild@v2
