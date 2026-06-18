@@ -1,81 +1,80 @@
 name: Weekly Wino Mail Unlocked Build
+
 on:
   schedule:
-    - cron: 0 6 * * 0
-  workflow_dispatch: null
+    - cron: '0 6 * * 0'
+  workflow_dispatch:
+
 permissions:
   contents: write
+
 env:
   UPSTREAM_REPO: FranzFerdiand/Wino-Mail-unlocked
   SOLUTION: WinoMail.slnx
-  CERT_SUBJECT: C=CN, CN=SzyangSoftware
+  CERT_SUBJECT: 'C=CN, CN=SzyangSoftware'
+
 jobs:
   build:
     runs-on: windows-latest
+
     steps:
       - name: Checkout current repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       - name: Clone upstream (depth=1)
         run: git clone --depth 1 https://github.com/${{ env.UPSTREAM_REPO }}.git src
+
       - name: Write .pfx from Base64 secret (absolute path)
         shell: pwsh
-        run: >
+        run: |
           $bytes = [Convert]::FromBase64String("${{ secrets.SIGN_PFX_B64 }}")
-
           $pfxPath = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\SigningCert.pfx"
-
           New-Item -ItemType Directory -Force -Path (Split-Path $pfxPath) | Out-Null
-
           [IO.File]::WriteAllBytes($pfxPath, $bytes)
-
           Write-Host "PFX written: $pfxPath  Exists=$(Test-Path $pfxPath)"
+
       - name: Patch AppxManifest Publisher to match cert Subject
         shell: pwsh
-        run: >
-          $manifest =
-          "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\Package.appxmanifest"
-
+        run: |
+          $manifest = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\Package.appxmanifest"
           $escapedSubject = '${{ env.CERT_SUBJECT }}'
-
           (Get-Content $manifest -Raw) -replace 'Publisher="[^"]*"', "Publisher=`"$escapedSubject`"" |
             Set-Content $manifest -NoNewline
           Write-Host "Patched Publisher → $escapedSubject"
+
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
         with:
           msbuild-architecture: x64
+
       - name: Cache NuGet packages
         uses: actions/cache@v4
         with:
           path: ~/.nuget/packages
-          key: ${{ runner.os }}-nuget-${{ hashFiles('src/**/*.csproj',
-            'src/Directory.Packages.props') }}
+          key: ${{ runner.os }}-nuget-${{ hashFiles('src/**/*.csproj', 'src/Directory.Packages.props') }}
           restore-keys: |
             ${{ runner.os }}-nuget-
+
       - name: Restore
         run: msbuild src/${{ env.SOLUTION }} /t:Restore
+
       - name: Extract PFX Thumbprint
         id: pfxinfo
         shell: pwsh
-        run: >
+        run: |
           $pfxPath = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\SigningCert.pfx"
-
           $pwd = ConvertTo-SecureString -String "${{ secrets.SIGN_PFX_PWD }}" -AsPlainText -Force
-
           $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($pfxPath, $pwd)
-
           $thumb = $cert.Thumbprint
-
           Write-Host "Thumbprint: $thumb"
-
           "thumbprint=$thumb" >> $env:GITHUB_OUTPUT
+
       - name: Build & Package MSIX (signed with pfx)
         shell: pwsh
-        run: >
+        run: |
           $pfxAbs = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\SigningCert.pfx"
-
           msbuild "src\${{ env.SOLUTION }}" `
             /p:Configuration=Release `
             /p:Platform=x64 `
@@ -87,32 +86,37 @@ jobs:
             /p:EnableSigningChecks=false `
             /p:IsPackable=false `
             /p:AppxAutoRemoveDisposableSigningCertificate=false
+
       - name: Find Msixbundle (recursive under src)
         id: msixbundle
         shell: pwsh
-        run: >
-          $f = Get-ChildItem "src" -Filter "*.msixbundle" -Recurse -File -ErrorAction
-          SilentlyContinue |
+        run: |
+          $f = Get-ChildItem "src" -Filter "*.msixbundle" -Recurse -File -ErrorAction SilentlyContinue |
                Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if (-not $f) { Write-Error "MSIX not found under src!"; exit 1 }
-
-          Write-Host "Found MSIX: $($f.FullName)"
-
+          if (-not $f) { Write-Error "MSIXBUNDLE not found under src!"; exit 1 }
+          Write-Host "Found MSIXBUNDLE: $($f.FullName)"
           "path=$($f.FullName)" >> $env:GITHUB_OUTPUT
+
       - name: Create GitHub Release (gh CLI)
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "build-${{ github.run_number }}"
-
-          # 删除旧的 release
+          $now = Get-Date
+          $year = $now.Year
+          $weekNum = [Globalization.CultureInfo]::InvariantCulture.Calendar.GetWeekOfYear(
+            $now,
+            [Globalization.CalendarWeekRule]::FirstDay,
+            [DayOfWeek]::Monday
+          )
+          
+          $tag = "v$year.$weekNum"
+          $releaseTitle = "Wino Mail Unlocked Weekly v$year.$weekNum"
+          $ts = $now.ToString("yyyy-MM-dd HH:mm:ss UTC")
+          
           gh release delete $tag --yes --discard-history 2>$null
-
-          # 创建新的 release 并上传 MSIX + cert.crt
-          $ts = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss UTC")
           gh release create $tag `
-            --title "Wino Mail Unlocked ${{ github.run_number }}" `
+            --title "$releaseTitle" `
             --notes "Built: $ts" `
             "${{ steps.msixbundle.outputs.path }}" `
             "cert.crt"
