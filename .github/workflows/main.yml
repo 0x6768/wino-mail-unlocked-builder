@@ -18,6 +18,11 @@ jobs:
     runs-on: windows-latest
 
     steps:
+      - name: Checkout current repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Clone upstream (depth=1)
         run: git clone --depth 1 https://github.com/${{ env.UPSTREAM_REPO }}.git src
 
@@ -55,7 +60,6 @@ jobs:
       - name: Restore
         run: msbuild src/${{ env.SOLUTION }} /t:Restore
 
-      # ★ 新增：提取 PFX 指纹，传给 Build 步骤
       - name: Extract PFX Thumbprint
         id: pfxinfo
         shell: pwsh
@@ -67,7 +71,6 @@ jobs:
           Write-Host "Thumbprint: $thumb"
           "thumbprint=$thumb" >> $env:GITHUB_OUTPUT
 
-      # ★ 修改：PackageCertificateThumbprint 从空字符串改为真实指纹
       - name: Build & Package MSIX (signed with pfx)
         shell: pwsh
         run: |
@@ -100,9 +103,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "build-${{ github.run_number }}"
+          
+          # 删除旧的 release
           gh release delete $tag --yes --discard-history 2>$null
+          
+          # 创建新的 release 并上传 MSIX + cert.crt
           $ts = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss UTC")
           gh release create $tag `
             --title "Wino Mail Unlocked ${{ github.run_number }}" `
             --notes "Built: $ts" `
-            "${{ steps.msix.outputs.path }}"
+            "${{ steps.msix.outputs.path }}" `
+            "cert.crt"
