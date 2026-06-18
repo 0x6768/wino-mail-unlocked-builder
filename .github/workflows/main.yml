@@ -1,0 +1,60 @@
+name: Weekly Wino Mail Unlocked Build
+
+on:
+  schedule:
+    - cron: '0 6 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_REPO: FranzFerdiand/Wino-Mail-unlocked
+  SOLUTION: WinoMail.slnx
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Clone upstream (depth=1)
+        run: git clone --depth 1 https://github.com/${{ env.UPSTREAM_REPO }}.git src
+
+      - name: Write fixed .pfx from secret
+        shell: pwsh
+        run: |
+          $bytes = [Convert]::FromBase64String("${{ secrets.SIGN_PFX_B64 }}")
+          [IO.File]::WriteAllBytes("src/WinoMail.Packaging/SigningCert.pfx", $bytes)
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Restore (msbuild restore, 兼容 slnx)
+        run: msbuild src/${{ env.SOLUTION }} /t:Restore
+
+      - name: Build & Package MSIX (sign with fixed pfx)
+        shell: pwsh
+        run: |
+          msbuild src/${{ env.SOLUTION }} `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /p:GenerateAppxPackageOnBuild=true `
+            /p:PackageCertificateKeyFile="src/WinoMail.Packaging/SigningCert.pfx" `
+            /p:PackageCertificatePassword="${{ secrets.SIGN_PFX_PWD }}"
+
+      - name: Find MSIX
+        id: msix
+        shell: pwsh
+        run: |
+          $f = Get-ChildItem src/WinoMail.Packaging -Recurse -Filter *.msix | Select-Object -First 1
+          if (-not $f) { Write-Error "MSIX not found!"; exit 1 }
+          "path=$($f.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Wino Mail Unlocked ${{ github.run_number }}
+          body: |
+            Built: ${{ github.run_started_at }}
+          files: ${{ steps.msix.outputs.path }}
