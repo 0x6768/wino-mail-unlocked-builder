@@ -88,7 +88,7 @@ jobs:
             /p:Platform=x64 `
             /p:GenerateAppxPackageOnBuild=true `
             /p:AppxBundle=Always `
-            /p:AppxBundlePlatforms="x86|x64|arm64" `
+            /p:AppxBundlePlatforms="x64" `
             /p:PackageCertificateKeyFile="$pfxAbs" `
             /p:PackageCertificatePassword="${{ secrets.SIGN_PFX_PWD }}" `
             /p:AppxPackageSigningEnabled=true `
