@@ -44,6 +44,25 @@ jobs:
             Set-Content $manifest -NoNewline
           Write-Host "Patched Publisher → $escapedSubject"
 
+      - name: Patch wapproj - enable signing & disable temp cert
+        shell: pwsh
+        run: |
+          $wproj = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\WinoMail.Packaging.wapproj"
+          if (-not (Test-Path $wproj)) { Write-Error "wapproj NOT FOUND!"; exit 1 }
+
+          $content = Get-Content $wproj -Raw
+
+          $content = $content -replace `
+            '<AppxPackageSigningEnabled>False</AppxPackageSigningEnabled>', `
+            '<AppxPackageSigningEnabled>True</AppxPackageSigningEnabled>'
+
+          $content = $content -replace `
+            '<GenerateTemporaryStoreCertificate>True</GenerateTemporaryStoreCertificate>', `
+            '<GenerateTemporaryStoreCertificate>False</GenerateTemporaryStoreCertificate>'
+
+          Set-Content $wproj -NoNewline -Value $content
+          Write-Host "Patched wapproj: signing enabled, temp cert disabled"
+
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
         with:
@@ -60,17 +79,6 @@ jobs:
       - name: Restore
         run: msbuild src/${{ env.SOLUTION }} /t:Restore
 
-      - name: Extract PFX Thumbprint
-        id: pfxinfo
-        shell: pwsh
-        run: |
-          $pfxPath = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\SigningCert.pfx"
-          $pwd = ConvertTo-SecureString -String "${{ secrets.SIGN_PFX_PWD }}" -AsPlainText -Force
-          $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($pfxPath, $pwd)
-          $thumb = $cert.Thumbprint
-          Write-Host "Thumbprint: $thumb"
-          "thumbprint=$thumb" >> $env:GITHUB_OUTPUT
-
       - name: Build & Package MSIX (signed with pfx)
         shell: pwsh
         run: |
@@ -79,13 +87,24 @@ jobs:
             /p:Configuration=Release `
             /p:Platform=x64 `
             /p:GenerateAppxPackageOnBuild=true `
+            /p:AppxBundle=Always `
+            /p:AppxBundlePlatforms="x86|x64|arm64" `
             /p:PackageCertificateKeyFile="$pfxAbs" `
             /p:PackageCertificatePassword="${{ secrets.SIGN_PFX_PWD }}" `
-            /p:PackageCertificateThumbprint="${{ steps.pfxinfo.outputs.thumbprint }}" `
             /p:AppxPackageSigningEnabled=true `
             /p:EnableSigningChecks=false `
             /p:IsPackable=false `
             /p:AppxAutoRemoveDisposableSigningCertificate=false
+
+      - name: Export certificate as .cer for release
+        shell: pwsh
+        run: |
+          $pfxPath = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\SigningCert.pfx"
+          $pwd = ConvertTo-SecureString -String "${{ secrets.SIGN_PFX_PWD }}" -AsPlainText -Force
+          $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($pfxPath, $pwd)
+          $cerPath = "$env:GITHUB_WORKSPACE\cert.cer"
+          [System.IO.File]::WriteAllBytes($cerPath, $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+          Write-Host "Exported .cer: $cerPath"
 
       - name: Find Msixbundle (recursive under src)
         id: msixbundle
@@ -109,14 +128,15 @@ jobs:
             [Globalization.CalendarWeekRule]::FirstDay,
             [DayOfWeek]::Monday
           )
-          
-          $tag = "v$year.$weekNum"
-          $releaseTitle = "Wino Mail Unlocked Weekly v$year.$weekNum"
+
+          $runNumber = $env:GITHUB_RUN_NUMBER
+          $tag = "v$year.$weekNum.r$runNumber"
+          $releaseTitle = "Wino Mail Unlocked Weekly v$year.$weekNum (run #$runNumber)"
           $ts = $now.ToString("yyyy-MM-dd HH:mm:ss UTC")
-          
+
           gh release delete $tag --yes --discard-history 2>$null
           gh release create $tag `
             --title "$releaseTitle" `
             --notes "Built: $ts" `
             "${{ steps.msixbundle.outputs.path }}" `
-            "cert.cer"
+            "$env:GITHUB_WORKSPACE\cert.cer"
