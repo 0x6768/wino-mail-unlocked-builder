@@ -131,7 +131,7 @@ jobs:
 
           $runNumber = $env:GITHUB_RUN_NUMBER
           $tag = "v$year.$weekNum.r$runNumber"
-          $releaseTitle = "Wino Mail Unlocked Weekly v$year.$weekNum (run #$runNumber)"
+          $releaseTitle = "v$year.$weekNum (run #$runNumber)"
           $ts = $now.ToString("yyyy-MM-dd HH:mm:ss UTC")
 
           gh release delete $tag --yes --discard-history 2>$null
