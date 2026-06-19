@@ -11,7 +11,7 @@ permissions:
 env:
   UPSTREAM_REPO: FranzFerdiand/Wino-Mail-unlocked
   SOLUTION: WinoMail.slnx
-  CERT_SUBJECT: 'C=CN, CN=SzyangSoftware'
+  CERT_SUBJECT: 'CN=SzyangSoftware'
 
 jobs:
   build:
@@ -21,7 +21,7 @@ jobs:
       - name: Checkout current repo
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Clone upstream (depth=1)
         run: git clone --depth 1 https://github.com/${{ env.UPSTREAM_REPO }}.git src
@@ -88,7 +88,7 @@ jobs:
             /p:Platform=x64 `
             /p:GenerateAppxPackageOnBuild=true `
             /p:AppxBundle=Always `
-            /p:AppxBundlePlatforms="x64" `
+            /p:AppxBundlePlatforms="x64|x86" `
             /p:PackageCertificateKeyFile="$pfxAbs" `
             /p:PackageCertificatePassword="${{ secrets.SIGN_PFX_PWD }}" `
             /p:AppxPackageSigningEnabled=true `
@@ -102,7 +102,7 @@ jobs:
           $pfxPath = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\SigningCert.pfx"
           $pwd = ConvertTo-SecureString -String "${{ secrets.SIGN_PFX_PWD }}" -AsPlainText -Force
           $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($pfxPath, $pwd)
-          $cerPath = "$env:GITHUB_WORKSPACE\cert.cer"
+          $cerPath = "$env:GITHUB_WORKSPACE\crt.cer"
           [System.IO.File]::WriteAllBytes($cerPath, $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
           Write-Host "Exported .cer: $cerPath"
 
@@ -139,4 +139,4 @@ jobs:
             --title "$releaseTitle" `
             --notes "Built: $ts" `
             "${{ steps.msixbundle.outputs.path }}" `
-            "$env:GITHUB_WORKSPACE\cert.cer"
+            "$env:GITHUB_WORKSPACE\crt.cer"
