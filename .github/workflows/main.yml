@@ -12,6 +12,7 @@ env:
   UPSTREAM_REPO: FranzFerdiand/Wino-Mail-unlocked
   SOLUTION: WinoMail.slnx
   CERT_SUBJECT: 'CN=SzyangSoftware'
+  DOTNET_URL: 'https://dotnet.microsoft.com/download/dotnet/9.0'
 
 jobs:
   build:
@@ -96,77 +97,50 @@ jobs:
             /p:IsPackable=false `
             /p:AppxAutoRemoveDisposableSigningCertificate=false
 
-      - name: Signtool - re-sign msixbundle (double sign insurance)
+      - name: Check signature and optionally re-sign
+        id: check_sign
         shell: pwsh
         run: |
           $pfxAbs = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\SigningCert.pfx"
           $pwd = "${{ secrets.SIGN_PFX_PWD }}"
-
-          # Find the msixbundle
+          
+          # Find msixbundle
           $bundle = Get-ChildItem "src" -Filter "*.msixbundle" -Recurse -File -ErrorAction SilentlyContinue |
                     Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if (-not $bundle) { Write-Error "MSIXBUNDLE not found!"; exit 1 }
-
-          Write-Host "Re-signing (append): $($bundle.FullName)"
-
-          # Find signtool.exe - try multiple common locations
-          $signtoolPaths = @(
-            "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe",
-            "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22000.0\x64\signtool.exe",
-            "C:\Program Files (x86)\Windows Kits\10\bin\10.0.20348.0\x64\signtool.exe",
-            "C:\Program Files (x86)\Windows Kits\10\bin\10.0.19041.0\x64\signtool.exe",
-            "C:\Program Files (x86)\Windows Kits\10\bin\x64\signtool.exe"
-          )
-
-          $signtool = $null
-          foreach ($path in $signtoolPaths) {
-            if (Test-Path $path) { $signtool = $path; break }
+          
+          $bundlePath = $bundle.FullName
+          Write-Host "Checking signature on: $bundlePath"
+          
+          # Check if already signed
+          $sigCheck = & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe" verify /pa "$bundlePath" 2>&1
+          $alreadySigned = $LASTEXITCODE -eq 0
+          
+          if ($alreadySigned) {
+            Write-Host "✅ Already signed, no action needed"
+            "sign_status=signed" >> $env:GITHUB_OUTPUT
+            "bundle_path=$bundlePath" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Host "❌ Not signed, attempting to sign..."
+            
+            # Try to sign
+            & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe" sign `
+              /fd SHA256 `
+              /f "$pfxAbs" `
+              /p "$pwd" `
+              /tr http://timestamp.digicert.com `
+              /td SHA256 `
+              "$bundlePath" 2>&1
+            
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "✅ Signed successfully via signtool"
+              "sign_status=signed" >> $env:GITHUB_OUTPUT
+            } else {
+              Write-Host "⚠️ Signing failed! Will upload unsigned."
+              "sign_status=sign_failed" >> $env:GITHUB_OUTPUT
+            }
+            "bundle_path=$bundlePath" >> $env:GITHUB_OUTPUT
           }
-
-          if (-not $signtool) {
-            # Fallback: find via where.exe
-            $signtool = (where.exe signtool 2>$null | Select-Object -First 1)
-          }
-
-          if (-not $signtool) { Write-Error "signtool.exe not found!"; exit 1 }
-
-          Write-Host "Using signtool: $signtool"
-
-          # Append signature (don't replace existing one)
-          & $signtool sign /fd SHA256 `
-            /a `
-            /f "$pfxAbs" `
-            /p "$pwd" `
-            /as `
-            /debug `
-            "$($bundle.FullName)"
-
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "Signtool failed with exit code $LASTEXITCODE"
-            exit $LASTEXITCODE
-          }
-
-          Write-Host "Double sign completed successfully!"
-
-      - name: Verify signature count on msixbundle
-        shell: pwsh
-        run: |
-          $bundle = Get-ChildItem "src" -Filter "*.msixbundle" -Recurse -File -ErrorAction SilentlyContinue |
-                    Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if (-not $bundle) { Write-Error "MSIXBUNDLE not found!"; exit 1 }
-
-          $signtool = (where.exe signtool 2>$null | Select-Object -First 1)
-          if (-not $signtool) {
-            # Try known paths
-            $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Filter "signtool.exe" -Recurse -ErrorAction SilentlyContinue |
-                        Select-Object -First 1 -ExpandProperty FullName
-          }
-
-          if ($signtool) {
-            & $signtool verify /pa /v "$($bundle.FullName)" 2>&1 | Select-String "Signature Index"
-          }
-
-          Write-Host "Bundle size: $((Get-Item $bundle.FullName).Length / 1MB) MB"
 
       - name: Export certificate as .cer for release
         shell: pwsh
@@ -177,16 +151,6 @@ jobs:
           $cerPath = "$env:GITHUB_WORKSPACE\crt.cer"
           [System.IO.File]::WriteAllBytes($cerPath, $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
           Write-Host "Exported .cer: $cerPath"
-
-      - name: Find Msixbundle (recursive under src)
-        id: msixbundle
-        shell: pwsh
-        run: |
-          $f = Get-ChildItem "src" -Filter "*.msixbundle" -Recurse -File -ErrorAction SilentlyContinue |
-               Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if (-not $f) { Write-Error "MSIXBUNDLE not found under src!"; exit 1 }
-          Write-Host "Found MSIXBUNDLE: $($f.FullName)"
-          "path=$($f.FullName)" >> $env:GITHUB_OUTPUT
 
       - name: Create GitHub Release (gh CLI)
         shell: pwsh
@@ -205,10 +169,29 @@ jobs:
           $tag = "v$year.$weekNum.r$runNumber"
           $releaseTitle = "v$year.$weekNum (run #$runNumber)"
           $ts = $now.ToString("yyyy-MM-dd HH:mm:ss UTC")
-
+          
+          # Build notes based on sign status
+          $signStatus = "${{ steps.check_sign.outputs.sign_status }}"
+          $bundlePath = "${{ steps.check_sign.outputs.bundle_path }}"
+          
+          $notes = @()
+          $notes += "Built: $ts"
+          $notes += ""
+          $notes += "如果安装时提示需要 .NET 运行时，请下载安装："
+          $notes += "${{ env.DOTNET_URL }}"
+          $notes += ""
+          
+          if ($signStatus -eq "sign_failed") {
+            $notes += "签名失败"
+          } else {
+            $notes += "已签名"
+          }
+          
+          $finalNotes = $notes -join "`n"
+          
           gh release delete $tag --yes --discard-history 2>$null
           gh release create $tag `
             --title "$releaseTitle" `
-            --notes "Built: $ts" `
-            "${{ steps.msixbundle.outputs.path }}" `
+            --notes "$finalNotes" `
+            "$bundlePath" `
             "$env:GITHUB_WORKSPACE\crt.cer"
