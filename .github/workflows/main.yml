@@ -26,14 +26,14 @@ jobs:
       - name: Clone upstream (depth=1)
         run: git clone --depth 1 https://github.com/${{ env.UPSTREAM_REPO }}.git src
 
-      - name: Write .pfx from Base64 secret (absolute path)
+      - name: Write .pfx from Base64 secret
         shell: pwsh
         run: |
           $bytes = [Convert]::FromBase64String("${{ secrets.SIGN_PFX_B64 }}")
           $pfxPath = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\SigningCert.pfx"
           New-Item -ItemType Directory -Force -Path (Split-Path $pfxPath) | Out-Null
           [IO.File]::WriteAllBytes($pfxPath, $bytes)
-          Write-Host "PFX written: $pfxPath  Exists=$(Test-Path $pfxPath)"
+          Write-Host "PFX written: $pfxPath"
 
       - name: Patch AppxManifest Publisher to match cert Subject
         shell: pwsh
@@ -43,25 +43,6 @@ jobs:
           (Get-Content $manifest -Raw) -replace 'Publisher="[^"]*"', "Publisher=`"$escapedSubject`"" |
             Set-Content $manifest -NoNewline
           Write-Host "Patched Publisher → $escapedSubject"
-
-      - name: Patch wapproj - enable signing & disable temp cert
-        shell: pwsh
-        run: |
-          $wproj = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\WinoMail.Packaging.wapproj"
-          if (-not (Test-Path $wproj)) { Write-Error "wapproj NOT FOUND!"; exit 1 }
-
-          $content = Get-Content $wproj -Raw
-
-          $content = $content -replace `
-            '<AppxPackageSigningEnabled>False</AppxPackageSigningEnabled>', `
-            '<AppxPackageSigningEnabled>True</AppxPackageSigningEnabled>'
-
-          $content = $content -replace `
-            '<GenerateTemporaryStoreCertificate>True</GenerateTemporaryStoreCertificate>', `
-            '<GenerateTemporaryStoreCertificate>False</GenerateTemporaryStoreCertificate>'
-
-          Set-Content $wproj -NoNewline -Value $content
-          Write-Host "Patched wapproj: signing enabled, temp cert disabled"
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
@@ -79,22 +60,37 @@ jobs:
       - name: Restore
         run: msbuild src/${{ env.SOLUTION }} /t:Restore
 
-      - name: Build & Package MSIX (signed with pfx)
+      - name: Build (unsigned MSIX)
         shell: pwsh
         run: |
-          $pfxAbs = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\SigningCert.pfx"
           msbuild "src\${{ env.SOLUTION }}" `
             /p:Configuration=Release `
             /p:Platform=x64 `
             /p:GenerateAppxPackageOnBuild=true `
             /p:AppxBundle=Always `
             /p:AppxBundlePlatforms="x64|x86" `
-            /p:PackageCertificateKeyFile="$pfxAbs" `
-            /p:PackageCertificatePassword="${{ secrets.SIGN_PFX_PWD }}" `
-            /p:AppxPackageSigningEnabled=true `
-            /p:EnableSigningChecks=false `
-            /p:IsPackable=false `
-            /p:AppxAutoRemoveDisposableSigningCertificate=false
+            /p:AppxPackageSigningEnabled=false
+
+      - name: Sign MSIX with signtool
+        shell: pwsh
+        run: |
+          # 找到刚生成的 msixbundle
+          $msix = Get-ChildItem "src" -Filter "*.msixbundle" -Recurse -File |
+                  Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $msix) { Write-Error "MSIXBUNDLE not found!"; exit 1 }
+
+          $pfxPath = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\SigningCert.pfx"
+
+          # 手动签名，跟你本地测试一致
+          & signtool.exe sign `
+            /fd SHA256 `
+            /f $pfxPath `
+            /p "${{ secrets.SIGN_PFX_PWD }}" `
+            /tr http://timestamp.digicert.com `
+            /td SHA256 `
+            "$($msix.FullName)"
+
+          Write-Host "✅ Signed successfully: $($msix.FullName)"
 
       - name: Export certificate as .cer for release
         shell: pwsh
@@ -106,17 +102,16 @@ jobs:
           [System.IO.File]::WriteAllBytes($cerPath, $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
           Write-Host "Exported .cer: $cerPath"
 
-      - name: Find Msixbundle (recursive under src)
+      - name: Find Msixbundle path for release
         id: msixbundle
         shell: pwsh
         run: |
-          $f = Get-ChildItem "src" -Filter "*.msixbundle" -Recurse -File -ErrorAction SilentlyContinue |
+          $f = Get-ChildItem "src" -Filter "*.msixbundle" -Recurse -File |
                Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if (-not $f) { Write-Error "MSIXBUNDLE not found under src!"; exit 1 }
-          Write-Host "Found MSIXBUNDLE: $($f.FullName)"
+          if (-not $f) { Write-Error "MSIXBUNDLE not found!"; exit 1 }
           "path=$($f.FullName)" >> $env:GITHUB_OUTPUT
 
-      - name: Create GitHub Release (gh CLI)
+      - name: Create GitHub Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -128,7 +123,6 @@ jobs:
             [Globalization.CalendarWeekRule]::FirstDay,
             [DayOfWeek]::Monday
           )
-
           $runNumber = $env:GITHUB_RUN_NUMBER
           $tag = "v$year.$weekNum.r$runNumber"
           $releaseTitle = "v$year.$weekNum (run #$runNumber)"
