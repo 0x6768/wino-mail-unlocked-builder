@@ -69,7 +69,8 @@ jobs:
             /p:GenerateAppxPackageOnBuild=true `
             /p:AppxBundle=Always `
             /p:AppxBundlePlatforms="x64|x86" `
-            /p:AppxPackageSigningEnabled=false
+            /p:AppxPackageSigningEnabled=false `
+            /p:IsPacking=false
 
       - name: Sign MSIX with signtool
         shell: pwsh
