@@ -52,11 +52,9 @@ jobs:
           if (-not (Test-Path $wproj)) { Write-Error "wapproj NOT FOUND!"; exit 1 }
 
           $content = Get-Content $wproj -Raw
-
           $content = $content -replace `
             '<AppxPackageSigningEnabled>False</AppxPackageSigningEnabled>', `
             '<AppxPackageSigningEnabled>True</AppxPackageSigningEnabled>'
-
           $content = $content -replace `
             '<GenerateTemporaryStoreCertificate>True</GenerateTemporaryStoreCertificate>', `
             '<GenerateTemporaryStoreCertificate>False</GenerateTemporaryStoreCertificate>'
@@ -68,6 +66,10 @@ jobs:
         uses: microsoft/setup-msbuild@v2
         with:
           msbuild-architecture: x64
+
+      # ★ 定位 signtool.exe 并加入 PATH，找不到此 step 会 fail-fast
+      - name: Add SignTool to PATH
+        uses: KamaranL/add-signtool-action@v1
 
       - name: Cache NuGet packages
         uses: actions/cache@v4
@@ -97,57 +99,56 @@ jobs:
             /p:IsPackable=false `
             /p:AppxAutoRemoveDisposableSigningCertificate=false
 
+      # ★ 前半段检查 signtool 是否在 PATH，找不到则 skip（exit 0 + output=skipped）
       - name: Check signature and optionally re-sign
         id: check_sign
         shell: pwsh
         run: |
           $pfxAbs = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\SigningCert.pfx"
-          $pwd = "${{ secrets.SIGN_PFX_PWD }}"
-          
-          # Find msixbundle
+          $pwd   = "${{ secrets.SIGN_PFX_PWD }}"
+
+          # —— 前半段：确认 signtool 在 PATH 中 ——
+          $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
+          if (-not $signtool) {
+            Write-Warning "⚠️ signtool.exe NOT found in PATH — skipping sign check/resign"
+            "sign_status=skipped_no_signtool" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          Write-Host "✔ Using signtool: $signtool"
+
+          # —— 找到 bundle ——
           $bundle = Get-ChildItem "src" -Filter "*.msixbundle" -Recurse -File -ErrorAction SilentlyContinue |
                     Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if (-not $bundle) { Write-Error "MSIXBUNDLE not found!"; exit 1 }
-          
+
           $bundlePath = $bundle.FullName
           Write-Host "Checking signature on: $bundlePath"
-          
-          # Check if already signed
-          $sigCheck = & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe" verify /pa "$bundlePath" 2>&1
-          $alreadySigned = $LASTEXITCODE -eq 0
-          
-          if ($alreadySigned) {
-            Write-Host "✅ Already signed, no action needed"
+
+          # —— 验签 ——
+          & "$signtool" verify /pa "$bundlePath" 2>&1 | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "✅ Already signed"
             "sign_status=signed" >> $env:GITHUB_OUTPUT
-            "bundle_path=$bundlePath" >> $env:GITHUB_OUTPUT
           } else {
-            Write-Host "❌ Not signed, attempting to sign..."
-            
-            # Try to sign
-            & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe" sign `
-              /fd SHA256 `
-              /f "$pfxAbs" `
-              /p "$pwd" `
-              /tr http://timestamp.digicert.com `
-              /td SHA256 `
-              "$bundlePath" 2>&1
-            
+            Write-Host "❌ Not signed, signing now…"
+            & "$signtool" sign /fd SHA256 /f "$pfxAbs" /p "$pwd" `
+              /tr http://timestamp.digicert.com /td SHA256 "$bundlePath" 2>&1
             if ($LASTEXITCODE -eq 0) {
-              Write-Host "✅ Signed successfully via signtool"
+              Write-Host "✅ Signed successfully"
               "sign_status=signed" >> $env:GITHUB_OUTPUT
             } else {
-              Write-Host "⚠️ Signing failed! Will upload unsigned."
+              Write-Host "⚠️ Signing failed"
               "sign_status=sign_failed" >> $env:GITHUB_OUTPUT
             }
-            "bundle_path=$bundlePath" >> $env:GITHUB_OUTPUT
           }
+          "bundle_path=$bundlePath" >> $env:GITHUB_OUTPUT
 
       - name: Export certificate as .cer for release
         shell: pwsh
         run: |
           $pfxPath = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\SigningCert.pfx"
-          $pwd = ConvertTo-SecureString -String "${{ secrets.SIGN_PFX_PWD }}" -AsPlainText -Force
-          $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($pfxPath, $pwd)
+          $secPwd = ConvertTo-SecureString -String "${{ secrets.SIGN_PFX_PWD }}" -AsPlainText -Force
+          $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($pfxPath, $secPwd)
           $cerPath = "$env:GITHUB_WORKSPACE\crt.cer"
           [System.IO.File]::WriteAllBytes($cerPath, $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
           Write-Host "Exported .cer: $cerPath"
@@ -158,40 +159,39 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $now = Get-Date
-          $year = $now.Year
+          $year  = $now.Year
           $weekNum = [Globalization.CultureInfo]::InvariantCulture.Calendar.GetWeekOfYear(
             $now,
             [Globalization.CalendarWeekRule]::FirstDay,
             [DayOfWeek]::Monday
           )
-
           $runNumber = $env:GITHUB_RUN_NUMBER
-          $tag = "v$year.$weekNum.r$runNumber"
+          $tag       = "v$year.$weekNum.r$runNumber"
           $releaseTitle = "v$year.$weekNum (run #$runNumber)"
           $ts = $now.ToString("yyyy-MM-dd HH:mm:ss UTC")
-          
-          # Build notes based on sign status
+
           $signStatus = "${{ steps.check_sign.outputs.sign_status }}"
           $bundlePath = "${{ steps.check_sign.outputs.bundle_path }}"
-          
-          $notes = @()
-          $notes += "Built: $ts"
-          $notes += ""
-          $notes += "如果安装时提示需要 .NET 运行时，请下载安装："
-          $notes += "${{ env.DOTNET_URL }}"
-          $notes += ""
-          
-          if ($signStatus -eq "sign_failed") {
-            $notes += "签名失败"
-          } else {
+
+          $notes = @(
+            "Built: $ts",
+            "",
+            "如果安装时提示需要 .NET 运行时，请下载安装：",
+            "${{ env.DOTNET_URL }}",
+            ""
+          )
+
+          if ($signStatus -eq "signed") {
             $notes += "已签名"
+          } elseif ($signStatus -eq "skipped_no_signtool") {
+            $notes += "签名检查跳过（signtool 未找到），包可能未签名"
+          } else {
+            $notes += "签名失败或未签名"
           }
-          
-          $finalNotes = $notes -join "`n"
-          
+
           gh release delete $tag --yes --discard-history 2>$null
           gh release create $tag `
             --title "$releaseTitle" `
-            --notes "$finalNotes" `
+            --notes ($notes -join "`n") `
             "$bundlePath" `
             "$env:GITHUB_WORKSPACE\crt.cer"
