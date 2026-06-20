@@ -26,14 +26,14 @@ jobs:
       - name: Clone upstream (depth=1)
         run: git clone --depth 1 https://github.com/${{ env.UPSTREAM_REPO }}.git src
 
-      - name: Write .pfx from Base64 secret
+      - name: Write .pfx from Base64 secret (absolute path)
         shell: pwsh
         run: |
           $bytes = [Convert]::FromBase64String("${{ secrets.SIGN_PFX_B64 }}")
           $pfxPath = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\SigningCert.pfx"
           New-Item -ItemType Directory -Force -Path (Split-Path $pfxPath) | Out-Null
           [IO.File]::WriteAllBytes($pfxPath, $bytes)
-          Write-Host "PFX written: $pfxPath"
+          Write-Host "PFX written: $pfxPath  Exists=$(Test-Path $pfxPath)"
 
       - name: Patch AppxManifest Publisher to match cert Subject
         shell: pwsh
@@ -43,6 +43,25 @@ jobs:
           (Get-Content $manifest -Raw) -replace 'Publisher="[^"]*"', "Publisher=`"$escapedSubject`"" |
             Set-Content $manifest -NoNewline
           Write-Host "Patched Publisher → $escapedSubject"
+
+      - name: Patch wapproj - enable signing & disable temp cert
+        shell: pwsh
+        run: |
+          $wproj = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\WinoMail.Packaging.wapproj"
+          if (-not (Test-Path $wproj)) { Write-Error "wapproj NOT FOUND!"; exit 1 }
+
+          $content = Get-Content $wproj -Raw
+
+          $content = $content -replace `
+            '<AppxPackageSigningEnabled>False</AppxPackageSigningEnabled>', `
+            '<AppxPackageSigningEnabled>True</AppxPackageSigningEnabled>'
+
+          $content = $content -replace `
+            '<GenerateTemporaryStoreCertificate>True</GenerateTemporaryStoreCertificate>', `
+            '<GenerateTemporaryStoreCertificate>False</GenerateTemporaryStoreCertificate>'
+
+          Set-Content $wproj -NoNewline -Value $content
+          Write-Host "Patched wapproj: signing enabled, temp cert disabled"
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
@@ -60,38 +79,94 @@ jobs:
       - name: Restore
         run: msbuild src/${{ env.SOLUTION }} /t:Restore
 
-      - name: Build (unsigned MSIX)
+      - name: Build & Package MSIX (signed with pfx)
         shell: pwsh
         run: |
+          $pfxAbs = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\SigningCert.pfx"
           msbuild "src\${{ env.SOLUTION }}" `
             /p:Configuration=Release `
             /p:Platform=x64 `
             /p:GenerateAppxPackageOnBuild=true `
             /p:AppxBundle=Always `
             /p:AppxBundlePlatforms="x64|x86" `
-            /p:AppxPackageSigningEnabled=false `
-            /p:IsPacking=false
+            /p:PackageCertificateKeyFile="$pfxAbs" `
+            /p:PackageCertificatePassword="${{ secrets.SIGN_PFX_PWD }}" `
+            /p:AppxPackageSigningEnabled=true `
+            /p:EnableSigningChecks=false `
+            /p:IsPackable=false `
+            /p:AppxAutoRemoveDisposableSigningCertificate=false
 
-      - name: Sign MSIX with signtool
+      - name: Signtool - re-sign msixbundle (double sign insurance)
         shell: pwsh
         run: |
-          # 找到刚生成的 msixbundle
-          $msix = Get-ChildItem "src" -Filter "*.msixbundle" -Recurse -File |
-                  Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if (-not $msix) { Write-Error "MSIXBUNDLE not found!"; exit 1 }
+          $pfxAbs = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\SigningCert.pfx"
+          $pwd = "${{ secrets.SIGN_PFX_PWD }}"
 
-          $pfxPath = "$env:GITHUB_WORKSPACE\src\WinoMail.Packaging\SigningCert.pfx"
+          # Find the msixbundle
+          $bundle = Get-ChildItem "src" -Filter "*.msixbundle" -Recurse -File -ErrorAction SilentlyContinue |
+                    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $bundle) { Write-Error "MSIXBUNDLE not found!"; exit 1 }
 
-          # 手动签名，跟你本地测试一致
-          & signtool.exe sign `
-            /fd SHA256 `
-            /f $pfxPath `
-            /p "${{ secrets.SIGN_PFX_PWD }}" `
-            /tr http://timestamp.digicert.com `
-            /td SHA256 `
-            "$($msix.FullName)"
+          Write-Host "Re-signing (append): $($bundle.FullName)"
 
-          Write-Host "✅ Signed successfully: $($msix.FullName)"
+          # Find signtool.exe - try multiple common locations
+          $signtoolPaths = @(
+            "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe",
+            "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22000.0\x64\signtool.exe",
+            "C:\Program Files (x86)\Windows Kits\10\bin\10.0.20348.0\x64\signtool.exe",
+            "C:\Program Files (x86)\Windows Kits\10\bin\10.0.19041.0\x64\signtool.exe",
+            "C:\Program Files (x86)\Windows Kits\10\bin\x64\signtool.exe"
+          )
+
+          $signtool = $null
+          foreach ($path in $signtoolPaths) {
+            if (Test-Path $path) { $signtool = $path; break }
+          }
+
+          if (-not $signtool) {
+            # Fallback: find via where.exe
+            $signtool = (where.exe signtool 2>$null | Select-Object -First 1)
+          }
+
+          if (-not $signtool) { Write-Error "signtool.exe not found!"; exit 1 }
+
+          Write-Host "Using signtool: $signtool"
+
+          # Append signature (don't replace existing one)
+          & $signtool sign /fd SHA256 `
+            /a `
+            /f "$pfxAbs" `
+            /p "$pwd" `
+            /as `
+            /debug `
+            "$($bundle.FullName)"
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Signtool failed with exit code $LASTEXITCODE"
+            exit $LASTEXITCODE
+          }
+
+          Write-Host "Double sign completed successfully!"
+
+      - name: Verify signature count on msixbundle
+        shell: pwsh
+        run: |
+          $bundle = Get-ChildItem "src" -Filter "*.msixbundle" -Recurse -File -ErrorAction SilentlyContinue |
+                    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $bundle) { Write-Error "MSIXBUNDLE not found!"; exit 1 }
+
+          $signtool = (where.exe signtool 2>$null | Select-Object -First 1)
+          if (-not $signtool) {
+            # Try known paths
+            $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Filter "signtool.exe" -Recurse -ErrorAction SilentlyContinue |
+                        Select-Object -First 1 -ExpandProperty FullName
+          }
+
+          if ($signtool) {
+            & $signtool verify /pa /v "$($bundle.FullName)" 2>&1 | Select-String "Signature Index"
+          }
+
+          Write-Host "Bundle size: $((Get-Item $bundle.FullName).Length / 1MB) MB"
 
       - name: Export certificate as .cer for release
         shell: pwsh
@@ -103,16 +178,17 @@ jobs:
           [System.IO.File]::WriteAllBytes($cerPath, $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
           Write-Host "Exported .cer: $cerPath"
 
-      - name: Find Msixbundle path for release
+      - name: Find Msixbundle (recursive under src)
         id: msixbundle
         shell: pwsh
         run: |
-          $f = Get-ChildItem "src" -Filter "*.msixbundle" -Recurse -File |
+          $f = Get-ChildItem "src" -Filter "*.msixbundle" -Recurse -File -ErrorAction SilentlyContinue |
                Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if (-not $f) { Write-Error "MSIXBUNDLE not found!"; exit 1 }
+          if (-not $f) { Write-Error "MSIXBUNDLE not found under src!"; exit 1 }
+          Write-Host "Found MSIXBUNDLE: $($f.FullName)"
           "path=$($f.FullName)" >> $env:GITHUB_OUTPUT
 
-      - name: Create GitHub Release
+      - name: Create GitHub Release (gh CLI)
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -124,6 +200,7 @@ jobs:
             [Globalization.CalendarWeekRule]::FirstDay,
             [DayOfWeek]::Monday
           )
+
           $runNumber = $env:GITHUB_RUN_NUMBER
           $tag = "v$year.$weekNum.r$runNumber"
           $releaseTitle = "v$year.$weekNum (run #$runNumber)"
